@@ -1,1 +1,147 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Плеер</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{
+  --bg:var(--tg-theme-bg-color,#fff);--bg2:var(--tg-theme-secondary-bg-color,#f1f1f4);
+  --tx:var(--tg-theme-text-color,#111);--hint:var(--tg-theme-hint-color,#888);
+  --ac:var(--tg-theme-button-color,#e0457b);--act:var(--tg-theme-button-text-color,#fff);
+  --safe:env(safe-area-inset-bottom,0px);
+}
+*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{background:var(--bg);color:var(--tx);font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+#app{max-width:980px;margin:0 auto;height:100%;display:flex;flex-direction:column}
+header{padding:12px 14px 6px}
+.search{width:100%;padding:11px 14px;border:0;border-radius:12px;background:var(--bg2);color:var(--tx);font:inherit}
+.tabs{display:flex;gap:8px;padding:8px 14px}
+.tab{padding:6px 14px;border-radius:99px;border:0;background:var(--bg2);color:var(--tx);font:inherit;cursor:pointer}
+.tab.on{background:var(--ac);color:var(--act)}
+main{flex:1;overflow-y:auto;padding:0 8px 16px}
+.list{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,400px),1fr));gap:2px}
+.row{display:flex;align-items:center;gap:12px;padding:8px 8px;border-radius:12px;cursor:pointer}
+.row:hover{background:var(--bg2)}.row.cur .t{color:var(--ac)}
+.row img,.ph{width:48px;height:48px;border-radius:8px;object-fit:cover;background:var(--bg2);flex:none}
+.meta{min-width:0;flex:1}
+.t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.a{color:var(--hint);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.heart{border:0;background:none;font-size:20px;color:var(--hint);cursor:pointer;padding:6px}
+.heart.on{color:var(--ac)}
+.empty{padding:40px 20px;text-align:center;color:var(--hint)}
+footer{background:var(--bg2);padding:10px 14px calc(10px + var(--safe));border-radius:18px 18px 0 0}
+.now{display:flex;align-items:center;gap:12px}
+.ctl{display:flex;align-items:center;gap:4px;margin-left:auto}
+.ctl button{border:0;background:none;color:var(--tx);font-size:22px;padding:8px;cursor:pointer}
+.ctl .play{background:var(--ac);color:var(--act);border-radius:50%;width:44px;height:44px;padding:0;font-size:18px}
+.seek{display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12px;color:var(--hint)}
+input[type=range]{flex:1;accent-color:var(--ac)}
+.vol{display:none;width:90px;flex:none}
+@media(min-width:760px){.vol{display:block}}
+</style>
+</head>
+<body>
+<div id="app">
+  <header><input id="q" class="search" type="search" placeholder="Трек, артист или жанр" autocomplete="off"></header>
+  <div class="tabs">
+    <button class="tab on" data-tab="trend">Популярное</button>
+    <button class="tab" data-tab="search">Поиск</button>
+    <button class="tab" data-tab="likes">Избранное</button>
+  </div>
+  <main><div id="list" class="list"></div></main>
+  <footer>
+    <div class="now">
+      <div class="ph" id="cover"></div>
+      <div class="meta"><div class="t" id="nt">Ничего не играет</div><div class="a" id="na">Выберите трек</div></div>
+      <div class="ctl">
+        <button id="prev" aria-label="Назад">⏮</button>
+        <button id="pp" class="play" aria-label="Играть">▶</button>
+        <button id="next" aria-label="Вперёд">⏭</button>
+      </div>
+    </div>
+    <div class="seek">
+      <span id="cur">0:00</span><input id="seek" type="range" min="0" max="1000" value="0"><span id="dur">0:00</span>
+      <input id="vol" class="vol" type="range" min="0" max="100" value="80" aria-label="Громкость">
+    </div>
+  </footer>
+</div>
+<script>
+const tg=window.Telegram&&Telegram.WebApp; if(tg){tg.ready();tg.expand();}
+const API="https://api.audius.co/v1", APP="tg_music_player";
+const $=s=>document.querySelector(s), audio=new Audio();
+let tab="trend", queue=[], idx=-1, likes=[];
+try{likes=JSON.parse(localStorage.getItem("likes")||"[]")}catch(e){}
+const saveLikes=()=>{try{localStorage.setItem("likes",JSON.stringify(likes))}catch(e){}};
+const isLiked=id=>likes.some(t=>t.id===id);
+const fmt=s=>isFinite(s)?Math.floor(s/60)+":"+String(Math.floor(s%60)).padStart(2,"0"):"0:00";
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+async function api(path,params={}){
+  const u=new URL(API+path); u.searchParams.set("app_name",APP);
+  for(const k in params)u.searchParams.set(k,params[k]);
+  const r=await fetch(u); if(!r.ok)throw new Error(r.status); return (await r.json()).data;
+}
+const slim=t=>({id:t.id,title:t.title,artist:t.user.name,art:(t.artwork||{})["150x150"]||"",dur:t.duration});
+
+function render(tracks,emptyMsg){
+  queue=tracks; const el=$("#list");
+  if(!tracks.length){el.innerHTML=`<div class="empty">${emptyMsg}</div>`;return;}
+  el.innerHTML=tracks.map((t,i)=>`<div class="row ${queue[idx]&&queue[idx].id===t.id?"cur":""}" data-i="${i}">
+    ${t.art?`<img src="${esc(t.art)}" alt="" loading="lazy">`:'<div class="ph"></div>'}
+    <div class="meta"><div class="t">${esc(t.title)}</div><div class="a">${esc(t.artist)} · ${fmt(t.dur)}</div></div>
+    <button class="heart ${isLiked(t.id)?"on":""}" data-h="${i}" aria-label="В избранное">${isLiked(t.id)?"♥":"♡"}</button></div>`).join("");
+}
+async function load(){
+  $("#list").innerHTML='<div class="empty">Загрузка…</div>';
+  try{
+    if(tab==="trend") render((await api("/tracks/trending",{limit:40})).map(slim),"Пусто");
+    else if(tab==="likes") render(likes,"Нажмите ♡ у трека, чтобы он появился здесь");
+    else{
+      const q=$("#q").value.trim();
+      if(!q) return render([],"Введите запрос в строке поиска");
+      render((await api("/tracks/search",{query:q,limit:40})).map(slim),"Ничего не найдено");
+    }
+  }catch(e){$("#list").innerHTML='<div class="empty">Не удалось загрузить. Проверьте соединение и попробуйте снова.</div>';}
+}
+function play(i){
+  if(i<0||i>=queue.length)return; idx=i; const t=queue[i];
+  audio.src=`${API}/tracks/${t.id}/stream?app_name=${APP}`; audio.play().catch(()=>{});
+  $("#nt").textContent=t.title; $("#na").textContent=t.artist;
+  $("#cover").style.cssText=t.art?`background:url(${t.art}) center/cover`:"";
+  document.querySelectorAll(".row").forEach((r,k)=>r.classList.toggle("cur",k===i));
+  if("mediaSession" in navigator){
+    navigator.mediaSession.metadata=new MediaMetadata({title:t.title,artist:t.artist,artwork:t.art?[{src:t.art,sizes:"150x150"}]:[]});
+  }
+}
+$("#list").addEventListener("click",e=>{
+  const h=e.target.closest("[data-h]");
+  if(h){const t=queue[+h.dataset.h]; likes=isLiked(t.id)?likes.filter(x=>x.id!==t.id):[t,...likes]; saveLikes();
+    if(tab==="likes"){const keep=idx>=0?queue[idx]:null; render(likes,"Нажмите ♡ у трека, чтобы он появился здесь"); idx=keep?queue.findIndex(x=>x.id===keep.id):-1;}
+    else{h.classList.toggle("on");h.textContent=isLiked(t.id)?"♥":"♡";}
+    tg&&tg.HapticFeedback&&tg.HapticFeedback.impactOccurred("light"); return;}
+  const r=e.target.closest(".row"); if(r)play(+r.dataset.i);
+});
+document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{
+  tab=b.dataset.tab; document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("on",x===b)); load();});
+let timer; $("#q").addEventListener("input",()=>{clearTimeout(timer);timer=setTimeout(()=>{
+  tab="search";document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("on",x.dataset.tab==="search"));load();},450);});
+const toggle=()=>audio.src?(audio.paused?audio.play():audio.pause()):(queue.length&&play(0));
+const next=()=>play(idx+1<queue.length?idx+1:0), prev=()=>audio.currentTime>3?(audio.currentTime=0):play(Math.max(0,idx-1));
+$("#pp").onclick=toggle; $("#next").onclick=next; $("#prev").onclick=prev;
+audio.onplay=()=>$("#pp").textContent="⏸"; audio.onpause=()=>$("#pp").textContent="▶";
+audio.onended=next; audio.onerror=()=>{if(idx>=0)next();};
+audio.ontimeupdate=()=>{if(audio.duration){$("#seek").value=audio.currentTime/audio.duration*1000;}
+  $("#cur").textContent=fmt(audio.currentTime);$("#dur").textContent=fmt(audio.duration);};
+$("#seek").oninput=e=>{if(audio.duration)audio.currentTime=e.target.value/1000*audio.duration;};
+$("#vol").oninput=e=>audio.volume=e.target.value/100; audio.volume=.8;
+if("mediaSession" in navigator){const m=navigator.mediaSession;
+  m.setActionHandler("play",toggle);m.setActionHandler("pause",toggle);
+  m.setActionHandler("nexttrack",next);m.setActionHandler("previoustrack",prev);}
+load();
+</script>
+</body>
+</html>
 
